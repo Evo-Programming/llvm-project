@@ -48,6 +48,7 @@ namespace ARMCP {
     TLSGD,          /// Thread Local Storage (General Dynamic Mode)
     GOT,            /// Global Offset Table
     GOTFUNCDESC,    /// Global Offset Table, Function Descriptor
+    GOTOFF,         /// Global Offset Table Offset
     GOTOFFFUNCDESC, /// Function Descriptor, GOT Offset
     GOT_PREL,       /// Global Offset Table, PC Relative
     GOTTPOFF,       /// Global Offset Table, Thread Pointer Offset

@@ -944,6 +944,8 @@ static uint8_t getModifierSpecifier(ARMCP::ARMCPModifier Modifier) {
     return ARM::S_GOT;
   case ARMCP::GOTFUNCDESC:
     return ARM::S_GOTFUNCDESC;
+  case ARMCP::GOTOFF:
+    return ARM::S_GOTOFF;
   case ARMCP::GOTOFFFUNCDESC:
     return ARM::S_GOTOFFFUNCDESC;
   case ARMCP::TPOFF:
