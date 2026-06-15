@@ -7854,6 +7854,10 @@ def massembler_fatal_warnings : Flag<["-"], "massembler-fatal-warnings">,
 def crel : Flag<["--"], "crel">,
   HelpText<"Enable CREL relocation format (ELF only)">,
   MarshallingInfoFlag<CodeGenOpts<"Crel">>;
+def mfdpic : Flag<["-"], "mfdpic">, Group<m_Group>,
+  Visibility<[ClangOption, CC1Option, CC1AsOption]>,
+  HelpText<"Use the FDPIC ABI">,
+  MarshallingInfoFlag<CodeGenOpts<"FDPIC">>;
 def reloc_section_sym : Joined<["--"], "reloc-section-sym=">,
   HelpText<"Section symbol conversion for relocations: all, internal, none (ELF only)">,
   Values<"all,internal,none">,

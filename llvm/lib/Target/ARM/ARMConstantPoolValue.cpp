@@ -58,6 +58,12 @@ StringRef ARMConstantPoolValue::getModifierText() const {
     return "none";
   case ARMCP::TLSGD:
     return "tlsgd";
+  case ARMCP::GOT:
+    return "GOT";
+  case ARMCP::GOTFUNCDESC:
+    return "GOTFUNCDESC";
+  case ARMCP::GOTOFFFUNCDESC:
+    return "GOTOFFFUNCDESC";
   case ARMCP::GOT_PREL:
     return "GOT_PREL";
   case ARMCP::GOTTPOFF:

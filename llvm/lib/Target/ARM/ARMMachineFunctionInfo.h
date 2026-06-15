@@ -17,6 +17,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -154,6 +155,9 @@ class ARMFunctionInfo : public MachineFunctionInfo {
   /// True if BTI instructions should be placed at potential indirect jump
   /// destinations.
   bool BranchTargetEnforcement = false;
+
+  /// virtual register holding the FDPIC GOT base received in r9 on entry
+  Register FDPICGOTBaseReg = Register();
 
 public:
   ARMFunctionInfo() = default;
@@ -299,6 +303,9 @@ public:
   }
 
   bool branchTargetEnforcement() const { return BranchTargetEnforcement; }
+
+  Register getFDPICGOTBaseReg() const { return FDPICGOTBaseReg; }
+  void setFDPICGOTBaseReg(Register Reg) { FDPICGOTBaseReg = Reg; }
 
   void initializeBaseYamlFields(const yaml::ARMFunctionInfo &YamlMFI);
 };

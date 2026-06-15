@@ -82,6 +82,18 @@ static void CheckPreprocessingOptions(const Driver &D, const ArgList &Args) {
   }
 }
 
+static bool isARMFDPICSupported(const llvm::Triple &Triple) {
+  switch (Triple.getArch()) {
+  default:
+    return false;
+  case llvm::Triple::arm:
+  case llvm::Triple::armeb:
+  case llvm::Triple::thumb:
+  case llvm::Triple::thumbeb:
+    return Triple.isOSBinFormatELF();
+  }
+}
+
 static void CheckCodeGenerationOptions(const Driver &D, const ArgList &Args) {
   // In gcc, only ARM checks this, but it seems reasonable to check universally.
   if (Args.hasArg(options::OPT_static))
@@ -2459,6 +2471,7 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
   StringRef RelocSectionSym;
   bool SFrame = false, ExperimentalSFrame = false;
   bool ImplicitMapSyms = false;
+  bool FDPIC = false;
   bool UseRelaxRelocations = C.getDefaultToolChain().useRelaxRelocations();
   bool UseNoExecStack = false;
   bool Msa = false;
@@ -2655,6 +2668,8 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
         Crel = true;
       } else if (Value == "--no-crel") {
         Crel = false;
+      } else if (Value == "--fdpic") {
+        FDPIC = true;
       } else if (Value == "--allow-experimental-crel") {
         ExperimentalCrel = true;
       } else if (Value.starts_with("--reloc-section-sym=")) {
@@ -2758,6 +2773,13 @@ static void CollectArgsForIntegratedAssembler(Compilation &C,
   }
   if (ImplicitMapSyms)
     CmdArgs.push_back("-mmapsyms=implicit");
+  if (FDPIC && !Args.hasArg(options::OPT_mfdpic)) {
+    if (isARMFDPICSupported(Triple))
+      CmdArgs.push_back("-mfdpic");
+    else
+      D.Diag(diag::err_drv_unsupported_opt_for_target)
+          << "-Wa,--fdpic" << D.getTargetTriple();
+  }
   if (Msa)
     CmdArgs.push_back("-mmsa");
   if (!UseRelaxRelocations)
@@ -5745,6 +5767,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
                 RelocationModel == llvm::Reloc::ROPI_RWPI;
   bool IsRWPI = RelocationModel == llvm::Reloc::RWPI ||
                 RelocationModel == llvm::Reloc::ROPI_RWPI;
+
+  if (Arg *A = Args.getLastArg(options::OPT_mfdpic)) {
+    if (!isARMFDPICSupported(Triple))
+      D.Diag(diag::err_drv_unsupported_opt_for_target)
+          << A->getSpelling() << Triple.str();
+    else
+      CmdArgs.push_back("-mfdpic");
+  }
 
   if (Args.hasArg(options::OPT_mcmse) &&
       !Args.hasArg(options::OPT_fallow_unsupported)) {
@@ -9199,6 +9229,13 @@ void ClangAs::ConstructJob(Compilation &C, const JobAction &JA,
   if (RMName) {
     CmdArgs.push_back("-mrelocation-model");
     CmdArgs.push_back(RMName);
+  }
+  if (Arg *A = Args.getLastArg(options::OPT_mfdpic)) {
+    if (!isARMFDPICSupported(Triple))
+      D.Diag(diag::err_drv_unsupported_opt_for_target)
+          << A->getSpelling() << Triple.str();
+    else
+      CmdArgs.push_back("-mfdpic");
   }
 
   // Optionally embed the -cc1as level arguments into the debug info, for build

@@ -296,7 +296,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
     HasNEONForFP = true;
 
   const ARM::ArchKind Arch = ARM::parseArch(TargetTriple.getArchName());
-  if (isRWPI() ||
+  if (isRWPI() || isFDPIC() ||
       (isTargetIOS() &&
        (Arch == ARM::ArchKind::ARMV6K || Arch == ARM::ArchKind::ARMV6) &&
        TargetTriple.isOSVersionLT(3, 0)))

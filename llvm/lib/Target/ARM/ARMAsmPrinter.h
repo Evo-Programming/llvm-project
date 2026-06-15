@@ -64,6 +64,8 @@ private:
   /// debug info can link properly.
   SmallPtrSet<const GlobalVariable*,2> EmittedPromotedGlobalLabels;
 
+  bool EmittingGlobalInitializer;
+
 public:
   explicit ARMAsmPrinter(TargetMachine &TM,
                          std::unique_ptr<MCStreamer> Streamer);
@@ -106,6 +108,8 @@ public:
   void emitXXStructor(const DataLayout &DL, const Constant *CV) override;
   void emitGlobalVariable(const GlobalVariable *GV) override;
   void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override;
+  const MCExpr *lowerConstant(const Constant *CV, const Constant *BaseCV,
+                              uint64_t Offset) override;
 
   MCSymbol *GetCPISymbol(unsigned CPID) const override;
 

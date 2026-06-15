@@ -170,6 +170,8 @@ struct AssemblerInvocation {
   LLVM_PREFERRED_TYPE(bool)
   unsigned Crel : 1;
   LLVM_PREFERRED_TYPE(bool)
+  unsigned FDPIC : 1;
+  LLVM_PREFERRED_TYPE(bool)
   unsigned ImplicitMapsyms : 1;
 
   LLVM_PREFERRED_TYPE(bool)
@@ -223,6 +225,7 @@ public:
     EmitDwarfUnwind = EmitDwarfUnwindType::Default;
     EmitCompactUnwindNonCanonical = false;
     Crel = false;
+    FDPIC = false;
     ImplicitMapsyms = 0;
     X86RelaxRelocations = 0;
     X86Sse2Avx = 0;
@@ -397,6 +400,7 @@ bool AssemblerInvocation::CreateFromArgs(AssemblerInvocation &Opts,
       Args.hasArg(OPT_femit_compact_unwind_non_canonical);
   Opts.EmitSFrameUnwind = Args.hasArg(OPT_gsframe);
   Opts.Crel = Args.hasArg(OPT_crel);
+  Opts.FDPIC = Args.hasArg(OPT_mfdpic);
   Opts.RelocSectionSym = RelocSectionSymType::All;
   if (auto *A = Args.getLastArg(OPT_reloc_section_sym))
     Opts.RelocSectionSym = StringSwitch<RelocSectionSymType>(A->getValue())
@@ -470,6 +474,7 @@ static bool ExecuteAssemblerImpl(AssemblerInvocation &Opts,
   MCOptions.EmitSFrameUnwind = Opts.EmitSFrameUnwind;
   MCOptions.MCSaveTempLabels = Opts.SaveTemporaryLabels;
   MCOptions.Crel = Opts.Crel;
+  MCOptions.FDPIC = Opts.FDPIC;
   MCOptions.RelocSectionSym = Opts.RelocSectionSym;
   MCOptions.ImplicitMapSyms = Opts.ImplicitMapsyms;
   MCOptions.X86RelaxRelocations = Opts.X86RelaxRelocations;

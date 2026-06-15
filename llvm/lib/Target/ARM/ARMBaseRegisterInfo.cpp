@@ -135,13 +135,17 @@ ARMBaseRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_iOS_SaveList;
 
   if (PushPopSplit == ARMSubtarget::SplitR7)
-    return STI.createAAPCSFrameChain() ? CSR_AAPCS_SplitPush_R7_SaveList
-                                       : CSR_ATPCS_SplitPush_SaveList;
+    return STI.createAAPCSFrameChain()
+               ? (STI.isFDPIC() ? CSR_AAPCS_SplitPush_R7_FDPIC_SaveList
+                                : CSR_AAPCS_SplitPush_R7_SaveList)
+               : (STI.isFDPIC() ? CSR_ATPCS_SplitPush_FDPIC_SaveList
+                                : CSR_ATPCS_SplitPush_SaveList);
 
   if (PushPopSplit == ARMSubtarget::SplitR11AAPCSSignRA)
-    return CSR_AAPCS_SplitPush_R11_SaveList;
+    return STI.isFDPIC() ? CSR_AAPCS_SplitPush_R11_FDPIC_SaveList
+                         : CSR_AAPCS_SplitPush_R11_SaveList;
 
-  return CSR_AAPCS_SaveList;
+  return STI.isFDPIC() ? CSR_AAPCS_FDPIC_SaveList : CSR_AAPCS_SaveList;
 }
 
 const MCPhysReg *ARMBaseRegisterInfo::getCalleeSavedRegsViaCopy(
@@ -173,6 +177,8 @@ ARMBaseRegisterInfo::getCallPreservedMask(const MachineFunction &MF,
 
   if (STI.isTargetDarwin() && CC == CallingConv::CXX_FAST_TLS)
     return CSR_iOS_CXX_TLS_RegMask;
+  if (STI.isFDPIC())
+    return CSR_AAPCS_FDPIC_RegMask;
   return STI.isTargetDarwin() ? CSR_iOS_RegMask : CSR_AAPCS_RegMask;
 }
 

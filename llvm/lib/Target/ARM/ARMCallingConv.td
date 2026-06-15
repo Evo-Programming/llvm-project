@@ -275,6 +275,8 @@ def CSR_FP_NEON_Interrupt_Regs : CalleeSavedRegs<(add CSR_FP_Interrupt_Regs,
 def CSR_AAPCS : CalleeSavedRegs<(add LR, R11, R10, R9, R8, R7, R6, R5, R4,
                                      (sequence "D%u", 15, 8))>;
 
+def CSR_AAPCS_FDPIC : CalleeSavedRegs<(sub CSR_AAPCS, R9)>;
+
 def CSR_AAPCS_FP : CalleeSavedRegs<(add CSR_AAPCS, CSR_FP_Interrupt_Regs)>;
 
 // The order of callee-saved registers needs to match the order we actually push
@@ -284,6 +286,8 @@ def CSR_AAPCS_FP : CalleeSavedRegs<(add CSR_AAPCS, CSR_FP_Interrupt_Regs)>;
 def CSR_ATPCS_SplitPush : CalleeSavedRegs<(add LR, R7, R6, R5, R4,
                                                R11, R10, R9, R8,
                                                (sequence "D%u", 15, 8))>;
+
+def CSR_ATPCS_SplitPush_FDPIC : CalleeSavedRegs<(sub CSR_ATPCS_SplitPush, R9)>;
 
 def CSR_Win_SplitFP : CalleeSavedRegs<(add R10, R9, R8, R7, R6, R5, R4,
                                                (sequence "D%u", 15, 8),
@@ -323,6 +327,10 @@ def CSR_AAPCS_SplitPush_R7 : CalleeSavedRegs<(add LR, R11,
                                                   R7, R6, R5, R4,
                                                   R10, R9, R8,
                                                   (sequence "D%u", 15, 8))>;
+def CSR_AAPCS_SplitPush_R11_FDPIC
+    : CalleeSavedRegs<(sub CSR_AAPCS_SplitPush_R11, R9)>;
+def CSR_AAPCS_SplitPush_R7_FDPIC
+    : CalleeSavedRegs<(sub CSR_AAPCS_SplitPush_R7, R9)>;
 
 // Constructors and destructors return 'this' in the ARM C++ ABI; since 'this'
 // and the pointer return value are both passed in R0 in these cases, this can
@@ -390,5 +398,4 @@ def CSR_FIQ_FP : CalleeSavedRegs<(add CSR_FIQ, CSR_FP_Interrupt_Regs)>;
 
 def CSR_FIQ_FP_NEON : CalleeSavedRegs<(add CSR_FIQ_FP, 
                                        CSR_FP_NEON_Interrupt_Regs)>;
-
 

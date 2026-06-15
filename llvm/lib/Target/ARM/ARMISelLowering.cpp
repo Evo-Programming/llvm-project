@@ -2065,7 +2065,8 @@ ARMTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     auto *GV = cast<GlobalAddressSDNode>(Callee)->getGlobal();
     if (CLI.CB) {
       auto *BB = CLI.CB->getParent();
-      PreferIndirect = Subtarget->isThumb() && Subtarget->hasMinSize() &&
+      PreferIndirect = !Subtarget->isFDPIC() && Subtarget->isThumb() &&
+                       Subtarget->hasMinSize() &&
                        count_if(GV->users(), [&BB](const User *U) {
                          return isa<Instruction>(U) &&
                                 cast<Instruction>(U)->getParent() == BB;
@@ -2412,6 +2413,25 @@ ARMTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   if (!MemOpChains.empty())
     Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, MemOpChains);
+
+  if (Subtarget->isFDPIC()) {
+    if (isa<GlobalAddressSDNode>(Callee) || isa<ExternalSymbolSDNode>(Callee)) {
+      RegsToPass.emplace_back(ARM::R9, getFDPICGOTBase(DAG, dl));
+    } else {
+      EVT PtrVT = getPointerTy(DAG.getDataLayout());
+      SDValue Entry =
+          DAG.getLoad(PtrVT, dl, Chain, Callee, MachinePointerInfo(), Align(4));
+      SDValue GOTAddr = DAG.getNode(ISD::ADD, dl, PtrVT, Callee,
+                                    DAG.getConstant(4, dl, PtrVT));
+      SDValue GOT = DAG.getLoad(PtrVT, dl, Chain, GOTAddr, MachinePointerInfo(),
+                                Align(4));
+      Chain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Entry.getValue(1),
+                          GOT.getValue(1));
+      Callee = DAG.getRegister(ARM::R12, PtrVT);
+      RegsToPass.emplace_back(ARM::R9, GOT);
+      RegsToPass.emplace_back(ARM::R12, Entry);
+    }
+  }
 
   // Build a sequence of copy-to-reg nodes chained together with token chain
   // and flag operands which copy the outgoing args into the appropriate regs.
@@ -3623,6 +3643,54 @@ bool ARMTargetLowering::isReadOnly(const GlobalValue *GV) const {
   return isa<Function>(GV);
 }
 
+SDValue ARMTargetLowering::getFDPICGOTBase(SelectionDAG &DAG,
+                                           const SDLoc &dl) const {
+  MachineFunction &MF = DAG.getMachineFunction();
+  ARMFunctionInfo *AFI = MF.getInfo<ARMFunctionInfo>();
+  Register Reg = AFI->getFDPICGOTBaseReg();
+  if (!Reg) {
+    Reg = MF.addLiveIn(ARM::R9, getRegClassFor(MVT::i32));
+    AFI->setFDPICGOTBaseReg(Reg);
+  }
+  return DAG.getCopyFromReg(DAG.getEntryNode(), dl, Reg,
+                            getPointerTy(DAG.getDataLayout()));
+}
+
+SDValue ARMTargetLowering::LowerGlobalAddressFDPIC(SDValue Op,
+                                                   SelectionDAG &DAG) const {
+  EVT PtrVT = getPointerTy(DAG.getDataLayout());
+  SDLoc dl(Op);
+  auto *GA = cast<GlobalAddressSDNode>(Op);
+  const GlobalValue *GV = GA->getGlobal();
+  MachineFunction &MF = DAG.getMachineFunction();
+
+  bool IsFunc = GV->getValueType()->isFunctionTy();
+  bool IsLocalFuncDesc = IsFunc && GV->isDSOLocal() && !GV->isWeakForLinker();
+  ARMCP::ARMCPModifier Modifier =
+      IsFunc ? (IsLocalFuncDesc ? ARMCP::GOTOFFFUNCDESC : ARMCP::GOTFUNCDESC)
+             : ARMCP::GOT;
+
+  ARMConstantPoolValue *CPV = ARMConstantPoolConstant::Create(GV, Modifier);
+  SDValue CPAddr = DAG.getTargetConstantPool(CPV, PtrVT, Align(4));
+  CPAddr = DAG.getNode(ARMISD::Wrapper, dl, PtrVT, CPAddr);
+  SDValue Offset = DAG.getLoad(
+      PtrVT, dl, DAG.getEntryNode(), CPAddr,
+      MachinePointerInfo::getConstantPool(DAG.getMachineFunction()));
+
+  SDValue GOTBase = getFDPICGOTBase(DAG, dl);
+  SDValue Result = DAG.getNode(ISD::ADD, dl, PtrVT, GOTBase, Offset);
+
+  if (!IsLocalFuncDesc)
+    Result = DAG.getLoad(PtrVT, dl, DAG.getEntryNode(), Result,
+                         MachinePointerInfo::getGOT(MF));
+
+  if (GA->getOffset())
+    Result = DAG.getNode(ISD::ADD, dl, PtrVT, Result,
+                         DAG.getConstant(GA->getOffset(), dl, PtrVT));
+
+  return Result;
+}
+
 SDValue ARMTargetLowering::LowerGlobalAddress(SDValue Op,
                                               SelectionDAG &DAG) const {
   switch (Subtarget->getTargetTriple().getObjectFormat()) {
@@ -3638,6 +3706,9 @@ SDValue ARMTargetLowering::LowerGlobalAddress(SDValue Op,
 
 SDValue ARMTargetLowering::LowerGlobalAddressELF(SDValue Op,
                                                  SelectionDAG &DAG) const {
+  if (Subtarget->isFDPIC())
+    return LowerGlobalAddressFDPIC(Op, DAG);
+
   EVT PtrVT = getPointerTy(DAG.getDataLayout());
   SDLoc dl(Op);
   const GlobalValue *GV = cast<GlobalAddressSDNode>(Op)->getGlobal();

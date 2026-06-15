@@ -376,6 +376,7 @@ public:
 
   bool isROPI() const;
   bool isRWPI() const;
+  bool isFDPIC() const { return Options.MCOptions.FDPIC; }
 
   bool useMachineScheduler() const { return UseMISched; }
   bool useMachinePipeliner() const { return UseMIPipeliner; }
