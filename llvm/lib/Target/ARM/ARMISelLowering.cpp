@@ -88,6 +88,7 @@
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCInstrItineraries.h"
 #include "llvm/MC/MCSchedule.h"
+#include "llvm/MC/SectionKind.h"
 #include "llvm/Support/AtomicOrdering.h"
 #include "llvm/Support/BranchProbability.h"
 #include "llvm/Support/Casting.h"
@@ -99,6 +100,7 @@
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/TargetParser/Triple.h"
@@ -3668,10 +3670,29 @@ SDValue ARMTargetLowering::LowerGlobalAddressFDPIC(SDValue Op,
   MachineFunction &MF = DAG.getMachineFunction();
 
   bool IsFunc = GV->getValueType()->isFunctionTy();
+  bool UseGOT = !GV->isDSOLocal() || GV->isWeakForLinker();
+
+  if (!IsFunc && !UseGOT) {
+    const auto *GO = dyn_cast<GlobalObject>(GV);
+    if (const auto *GA = dyn_cast<GlobalAlias>(GV))
+      GO = GA->getAliaseeObject();
+
+    if (GO && !GO->isDeclarationForLinker()) {
+      SectionKind Kind =
+          TargetLoweringObjectFile::getKindForGlobal(GO, getTargetMachine());
+      if (Kind.isReadOnly()) {
+        SDValue G = DAG.getTargetGlobalAddress(GV, dl, PtrVT, GA->getOffset());
+        return DAG.getNode(ARMISD::WrapperPIC, dl, PtrVT, G);
+      }
+    } else {
+      UseGOT = true;
+    }
+  }
+
   bool IsLocalFuncDesc = IsFunc && GV->isDSOLocal() && !GV->isWeakForLinker();
   ARMCP::ARMCPModifier Modifier =
       IsFunc ? (IsLocalFuncDesc ? ARMCP::GOTOFFFUNCDESC : ARMCP::GOTFUNCDESC)
-             : ARMCP::GOT;
+             : (UseGOT ? ARMCP::GOT : ARMCP::GOTOFF);
 
   ARMConstantPoolValue *CPV = ARMConstantPoolConstant::Create(GV, Modifier);
   SDValue CPAddr = DAG.getTargetConstantPool(CPV, PtrVT, Align(4));
@@ -3683,7 +3704,7 @@ SDValue ARMTargetLowering::LowerGlobalAddressFDPIC(SDValue Op,
   SDValue GOTBase = getFDPICGOTBase(DAG, dl);
   SDValue Result = DAG.getNode(ISD::ADD, dl, PtrVT, GOTBase, Offset);
 
-  if (!IsLocalFuncDesc)
+  if (UseGOT || (IsFunc && !IsLocalFuncDesc))
     Result = DAG.getLoad(PtrVT, dl, DAG.getEntryNode(), Result,
                          MachinePointerInfo::getGOT(MF));
 
