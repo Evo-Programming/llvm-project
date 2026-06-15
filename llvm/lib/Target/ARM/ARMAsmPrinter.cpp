@@ -26,6 +26,8 @@
 #include "llvm/CodeGen/MachineModuleInfoImpls.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -43,6 +45,7 @@
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 using namespace llvm;
@@ -52,7 +55,8 @@ using namespace llvm;
 ARMAsmPrinter::ARMAsmPrinter(TargetMachine &TM,
                              std::unique_ptr<MCStreamer> Streamer)
     : AsmPrinter(TM, std::move(Streamer), ID), AFI(nullptr), MCP(nullptr),
-      InConstantPool(false), OptimizationGoals(-1) {}
+      InConstantPool(false), OptimizationGoals(-1),
+      EmittingGlobalInitializer(false) {}
 
 const ARMBaseTargetMachine &ARMAsmPrinter::getTM() const {
   return static_cast<const ARMBaseTargetMachine &>(TM);
@@ -136,7 +140,40 @@ void ARMAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   if (PromotedGlobals.count(GV))
     // The global was promoted into a constant pool. It should not be emitted.
     return;
+
+  SaveAndRestore EmittingGlobalInitializerState(EmittingGlobalInitializer,
+                                                true);
   AsmPrinter::emitGlobalVariable(GV);
+}
+
+static const GlobalValue *getFDPICFunctionDescriptorSymbol(const Constant *CV) {
+  const Value *V = CV->stripPointerCasts();
+  if (const auto *F = dyn_cast<Function>(V))
+    return F;
+
+  const auto *GA = dyn_cast<GlobalAlias>(V);
+  if (!GA)
+    return nullptr;
+
+  if (GA->getValueType()->isFunctionTy())
+    return GA;
+
+  if (const GlobalObject *Aliasee = GA->getAliaseeObject())
+    if (isa<Function>(Aliasee))
+      return GA;
+
+  return nullptr;
+}
+
+const MCExpr *ARMAsmPrinter::lowerConstant(const Constant *CV,
+                                           const Constant *BaseCV,
+                                           uint64_t Offset) {
+  if (EmittingGlobalInitializer && TM.Options.MCOptions.FDPIC)
+    if (const GlobalValue *GV = getFDPICFunctionDescriptorSymbol(CV))
+      return MCSymbolRefExpr::create(GetARMGVSymbol(GV, ARMII::MO_NO_FLAG),
+                                     ARM::S_FUNCDESC, OutContext);
+
+  return AsmPrinter::lowerConstant(CV, BaseCV, Offset);
 }
 
 /// runOnMachineFunction - This uses the emitInstruction()
@@ -903,6 +940,12 @@ static uint8_t getModifierSpecifier(ARMCP::ARMCPModifier Modifier) {
     return ARM::S_None;
   case ARMCP::TLSGD:
     return ARM::S_TLSGD;
+  case ARMCP::GOT:
+    return ARM::S_GOT;
+  case ARMCP::GOTFUNCDESC:
+    return ARM::S_GOTFUNCDESC;
+  case ARMCP::GOTOFFFUNCDESC:
+    return ARM::S_GOTOFFFUNCDESC;
   case ARMCP::TPOFF:
     return ARM::S_TPOFF;
   case ARMCP::GOTTPOFF:

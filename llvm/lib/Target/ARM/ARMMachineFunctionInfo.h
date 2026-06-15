@@ -17,6 +17,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/CodeGen/MIRYamlMapping.h"
 #include "llvm/CodeGen/MachineFunction.h"
+#include "llvm/CodeGen/Register.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/Support/ErrorHandling.h"
 
@@ -158,6 +159,9 @@ class ARMFunctionInfo : public MachineFunctionInfo {
   /// The result of EstimateFunctionSizeInBytes, if that was run during frame
   /// lowering. Used to check later that the estimate was conservative.
   std::optional<unsigned> EstimatedFunctionSizeInBytes;
+
+  /// virtual register holding the FDPIC GOT base received in r9 on entry
+  Register FDPICGOTBaseReg = Register();
 
 public:
   ARMFunctionInfo() = default;
@@ -310,6 +314,9 @@ public:
   }
 
   bool branchTargetEnforcement() const { return BranchTargetEnforcement; }
+
+  Register getFDPICGOTBaseReg() const { return FDPICGOTBaseReg; }
+  void setFDPICGOTBaseReg(Register Reg) { FDPICGOTBaseReg = Reg; }
 
   void initializeBaseYamlFields(const yaml::ARMFunctionInfo &YamlMFI);
 };
