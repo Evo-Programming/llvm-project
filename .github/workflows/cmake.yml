@@ -1,0 +1,250 @@
+name: "CMake Build"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  BUILD_TYPE: Release
+  LLVM_TARGETS: >-
+    clang
+    clang-apply-replacements
+    clang-change-namespace
+    clang-doc
+    clang-include-cleaner
+    clang-include-fixer
+    clang-move
+    clang-query
+    clang-reorder-fields
+    clang-tidy
+    clangd
+    find-all-symbols
+    lld
+    lldb
+    lldb-dap
+    lldb-instr
+    lldb-mcp
+    lldb-server
+    lldb-test
+    llc
+    llvm-addr2line
+    llvm-ar
+    llvm-as
+    llvm-bcanalyzer
+    llvm-config
+    llvm-cov
+    llvm-cxxfilt
+    llvm-diff
+    llvm-dis
+    llvm-dwarfdump
+    llvm-link
+    llvm-lto
+    llvm-lto2
+    llvm-nm
+    llvm-objcopy
+    llvm-objdump
+    llvm-profdata
+    llvm-ranlib
+    llvm-readelf
+    llvm-readobj
+    llvm-size
+    llvm-strings
+    llvm-strip
+    llvm-symbolizer
+    builtins-armv8m.main-none-eabi
+    runtimes-armv8m.main-none-eabi
+  INSTALL_TARGETS: >-
+    install-clang
+    install-clang-resource-headers
+    install-clang-apply-replacements
+    install-clang-change-namespace
+    install-clang-doc
+    install-clang-include-cleaner
+    install-clang-include-fixer
+    install-clang-move
+    install-clang-query
+    install-clang-reorder-fields
+    install-clang-tidy
+    install-clangd
+    install-find-all-symbols
+    install-lld
+    install-lldb
+    install-lldb-dap
+    install-lldb-instr
+    install-lldb-mcp
+    install-lldb-server
+    install-lldb-test
+    install-llc
+    install-llvm-addr2line
+    install-llvm-ar
+    install-llvm-as
+    install-llvm-bcanalyzer
+    install-llvm-config
+    install-llvm-cov
+    install-llvm-cxxfilt
+    install-llvm-diff
+    install-llvm-dis
+    install-llvm-dwarfdump
+    install-llvm-link
+    install-llvm-lto
+    install-llvm-lto2
+    install-llvm-nm
+    install-llvm-objcopy
+    install-llvm-objdump
+    install-llvm-profdata
+    install-llvm-ranlib
+    install-llvm-readelf
+    install-llvm-readobj
+    install-llvm-size
+    install-llvm-strings
+    install-llvm-strip
+    install-llvm-symbolizer
+    install-builtins-armv8m.main-none-eabi
+    install-runtimes-armv8m.main-none-eabi
+
+jobs:
+  build-arm-toolchain:
+    name: Build ARM toolchain (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runs-on: ubuntu-latest
+          - name: macos
+            runs-on: macos-latest
+          - name: windows
+            runs-on: windows-latest
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+      - name: Configure MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3-yaml
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja
+          python3 -m pip install --user PyYAML || python3 -m pip install --break-system-packages PyYAML
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: pip install ninja PyYAML
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: "v0.16.0"
+
+      - name: Configure sccache
+        shell: bash
+        run: echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+
+      - name: Checkout project
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/cmake
+            cmake
+            third-party
+            llvm
+            clang
+            clang-tools-extra
+            compiler-rt
+            libc
+            libunwind
+            lld
+            lldb
+            runtimes
+
+      - name: Configure LLVM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cc=clang-cl
+            cxx=clang-cl
+          else
+            cc=clang
+            cxx=clang++
+          fi
+          install_prefix="$PWD/package"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            install_prefix="$(cygpath -m "$install_prefix")"
+          fi
+
+          cmake -S llvm -B build -GNinja \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+            -DCMAKE_INSTALL_PREFIX="$install_prefix" \
+            -DCMAKE_C_COMPILER="$cc" \
+            -DCMAKE_CXX_COMPILER="$cxx" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;lld;lldb" \
+            -DLLVM_ENABLE_RUNTIMES="compiler-rt;libc" \
+            -DLLVM_BUILTIN_TARGETS=armv8m.main-none-eabi \
+            -DLLVM_RUNTIME_TARGETS=armv8m.main-none-eabi \
+            -DRUNTIMES_armv8m.main-none-eabi_LLVM_BINARY_DIR= \
+            -DRUNTIMES_armv8m.main-none-eabi_LLVM_ENABLE_RUNTIMES=libc \
+            -DBUILTINS_armv8m.main-none-eabi_CACHE_FILES="$PWD/.github/cmake/armv8m.main-none-eabi-builtins.cmake" \
+            -DRUNTIMES_armv8m.main-none-eabi_CACHE_FILES="$PWD/.github/cmake/armv8m.main-none-eabi-runtimes.cmake" \
+            -DLLVM_TARGETS_TO_BUILD=ARM \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD= \
+            -DLLVM_DEFAULT_TARGET_TRIPLE=arm-none-eabi \
+            -DCLANG_DEFAULT_LINKER=lld \
+            -DCLANG_DEFAULT_OBJCOPY=llvm-objcopy \
+            -DLLVM_INCLUDE_EXAMPLES:BOOL=OFF \
+            -DLLVM_INCLUDE_TESTS:BOOL=OFF \
+            -DLLVM_ENABLE_ZSTD:BOOL=OFF \
+            -DLLVM_PARALLEL_LINK_JOBS:STRING=1
+
+      - name: Build ARM toolchain
+        shell: bash
+        run: cmake --build build --config "$BUILD_TYPE" --target $LLVM_TARGETS --parallel
+
+      - name: Install ARM toolchain
+        shell: bash
+        run: cmake --build build --config "$BUILD_TYPE" --target $INSTALL_TARGETS --parallel
+
+      - name: Package ARM toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            find package/bin -type f -perm -111 -exec strip {} + || true
+          fi
+
+          cmake -E chdir package cmake -E tar cf "../arm-toolchain-${{ matrix.name }}.zip" --format=zip .
+
+      - name: Smoke test ARM codegen
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          exe=
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            exe=.exe
+          fi
+
+          printf 'void test(void) {}\n' > test.c
+          ./package/bin/clang${exe} \
+            --target=arm-none-eabi \
+            -mcpu=cortex-m33+nodsp+nofp \
+            -S test.c \
+            -o test.s
+
+      - name: Upload ARM toolchain
+        uses: actions/upload-artifact@v7
+        with:
+          name: arm-toolchain-${{ matrix.name }}
+          path: arm-toolchain-${{ matrix.name }}.zip
