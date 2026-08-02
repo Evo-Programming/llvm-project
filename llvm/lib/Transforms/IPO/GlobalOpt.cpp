@@ -350,10 +350,15 @@ static bool CleanupConstantGlobalUsers(GlobalVariable *GV,
 /// Part of the global at a specific offset, which is only accessed through
 /// loads and stores with the given type.
 struct GlobalPart {
+  explicit GlobalPart(Type *Ty) : Ty(Ty) {}
+
   Type *Ty;
   Constant *Initializer = nullptr;
   bool IsLoaded = false;
   bool IsStored = false;
+  SmallPtrSet<BasicBlock *, 2> LoadBlocks;
+  SmallPtrSet<BasicBlock *, 2> StoreBlocks;
+  SmallPtrSet<Function *, 2> AccessingFunctions;
 };
 
 /// Look at all uses of the global and determine which (offset, type) pairs it
@@ -394,8 +399,7 @@ static bool collectSRATypes(DenseMap<uint64_t, GlobalPart> &Parts,
       // TODO: We currently require that all accesses at a given offset must
       // use the same type. This could be relaxed.
       Type *Ty = getLoadStoreType(V);
-      const auto &[It, Inserted] =
-          Parts.try_emplace(Offset.getZExtValue(), GlobalPart{Ty});
+      const auto &[It, Inserted] = Parts.try_emplace(Offset.getZExtValue(), Ty);
       if (Ty != It->second.Ty)
         return false;
 
@@ -427,8 +431,17 @@ static bool collectSRATypes(DenseMap<uint64_t, GlobalPart> &Parts,
         return Initializer != StoredConst;
       };
 
-      It->second.IsLoaded |= isa<LoadInst>(V);
-      It->second.IsStored |= IsStored(V, It->second.Initializer);
+      bool IsLoad = isa<LoadInst>(V);
+      bool IsMeaningfulStore = IsStored(V, It->second.Initializer);
+      It->second.IsLoaded |= IsLoad;
+      It->second.IsStored |= IsMeaningfulStore;
+
+      BasicBlock *BB = cast<Instruction>(V)->getParent();
+      It->second.AccessingFunctions.insert(BB->getParent());
+      if (IsLoad)
+        It->second.LoadBlocks.insert(BB);
+      if (IsMeaningfulStore)
+        It->second.StoreBlocks.insert(BB);
       continue;
     }
 
@@ -450,6 +463,7 @@ static bool collectSRATypes(DenseMap<uint64_t, GlobalPart> &Parts,
 static void transferSRADebugInfo(GlobalVariable *GV, GlobalVariable *NGV,
                                  uint64_t FragmentOffsetInBits,
                                  uint64_t FragmentSizeInBits,
+                                 uint64_t ReplacementOffsetInBytes,
                                  uint64_t VarSize) {
   SmallVector<DIGlobalVariableExpression *, 1> GVs;
   GV->getDebugInfo(GVs);
@@ -489,9 +503,10 @@ static void transferSRADebugInfo(GlobalVariable *GV, GlobalVariable *NGV,
         CurVarEndInBits <= FragmentEndInBits) {
       uint64_t CurVarOffsetInFragment =
           (CurVarOffsetInBits - FragmentOffsetInBits) / 8;
-      if (CurVarOffsetInFragment != 0)
-        Expr = DIExpression::get(Expr->getContext(), {dwarf::DW_OP_plus_uconst,
-                                                      CurVarOffsetInFragment});
+      uint64_t NewVarOffset = ReplacementOffsetInBytes + CurVarOffsetInFragment;
+      if (NewVarOffset != 0)
+        Expr = DIExpression::get(Expr->getContext(),
+                                 {dwarf::DW_OP_plus_uconst, NewVarOffset});
       else
         Expr = DIExpression::get(Expr->getContext(), {});
       auto *NGVE =
@@ -501,16 +516,22 @@ static void transferSRADebugInfo(GlobalVariable *GV, GlobalVariable *NGV,
     }
     // Current variable does not fit in single fragment,
     // emit a fragment expression.
-    if (FragmentSizeInBits < VarSize) {
+    bool NeedsFragment = FragmentSizeInBits < VarSize;
+    uint64_t CurVarFragmentOffsetInBits = 0;
+    uint64_t CurVarFragmentSizeInBits = FragmentSizeInBits;
+    if (NeedsFragment) {
       if (CurVarOffsetInBits > FragmentOffsetInBits)
         continue;
-      uint64_t CurVarFragmentOffsetInBits =
-          FragmentOffsetInBits - CurVarOffsetInBits;
-      uint64_t CurVarFragmentSizeInBits = FragmentSizeInBits;
+      CurVarFragmentOffsetInBits = FragmentOffsetInBits - CurVarOffsetInBits;
       if (CurVarSize != 0 && CurVarEndInBits < FragmentEndInBits)
         CurVarFragmentSizeInBits -= (FragmentEndInBits - CurVarEndInBits);
       if (CurVarOffsetInBits)
         Expr = DIExpression::get(Expr->getContext(), {});
+    }
+    if (ReplacementOffsetInBytes != 0)
+      Expr = DIExpression::append(
+          Expr, {dwarf::DW_OP_plus_uconst, ReplacementOffsetInBytes});
+    if (NeedsFragment) {
       if (auto E = DIExpression::createFragmentExpression(
               Expr, CurVarFragmentOffsetInBits, CurVarFragmentSizeInBits))
         Expr = *E;
@@ -539,9 +560,9 @@ static GlobalVariable *SRAGlobal(GlobalVariable *GV, const DataLayout &DL) {
   if (Parts.size() == 1 && Parts.begin()->second.Ty == GV->getValueType())
     return nullptr;
 
-  // Don't perform SRA if we would have to split into many globals. Ignore
-  // parts that are either only loaded or only stored, because we expect them
-  // to be optimized away.
+  // Don't perform SRA if many parts need retained storage. Ignore parts that
+  // are either only loaded or only stored, because we expect them to be
+  // optimized away.
   unsigned NumParts = count_if(Parts, [](const auto &Pair) {
     return Pair.second.IsLoaded && Pair.second.IsStored;
   });
@@ -570,35 +591,185 @@ static GlobalVariable *SRAGlobal(GlobalVariable *GV, const DataLayout &DL) {
   if (Offset > GV->getGlobalSize(DL))
     return nullptr;
 
-  LLVM_DEBUG(dbgs() << "PERFORMING GLOBAL SRA ON: " << *GV << "\n");
-
-  // Get the alignment of the global, either explicit or target-specific.
   Align StartAlignment =
       DL.getValueOrABITypeAlignment(GV->getAlign(), GV->getValueType());
+
+  // Group parts that are both loaded and stored in the same basic block and
+  // have identical accessing-function sets. This preserves their relationship
+  // for load/store combining and vectorization without coupling parts whose
+  // linker-level liveness may differ. Use equivalence classes so transitive
+  // co-accesses form one group while one-sided parts remain independent.
+  SmallVector<unsigned, 16> GroupParents(TypesVector.size());
+  for (unsigned I = 0; I != TypesVector.size(); ++I)
+    GroupParents[I] = I;
+
+  auto FindGroup = [&](unsigned I) {
+    unsigned Root = I;
+    while (GroupParents[Root] != Root)
+      Root = GroupParents[Root];
+    while (GroupParents[I] != I) {
+      unsigned Parent = GroupParents[I];
+      GroupParents[I] = Root;
+      I = Parent;
+    }
+    return Root;
+  };
+
+  auto UnionGroups = [&](unsigned A, unsigned B) {
+    A = FindGroup(A);
+    B = FindGroup(B);
+    if (A != B)
+      GroupParents[std::max(A, B)] = std::min(A, B);
+  };
+
+  DenseMap<BasicBlock *, unsigned> PreviousPart;
+  for (unsigned I = 0; I != TypesVector.size(); ++I) {
+    uint64_t OffsetForTy = std::get<0>(TypesVector[I]);
+    const GlobalPart &Part = Parts.find(OffsetForTy)->second;
+    if (!Part.IsLoaded || !Part.IsStored)
+      continue;
+
+    for (BasicBlock *BB : Part.LoadBlocks) {
+      if (!Part.StoreBlocks.contains(BB))
+        continue;
+      const auto &[It, Inserted] = PreviousPart.try_emplace(BB, I);
+      if (Inserted)
+        continue;
+
+      unsigned Previous = It->second;
+      uint64_t PreviousOffset = std::get<0>(TypesVector[Previous]);
+      const GlobalPart &PreviousGlobalPart = Parts.find(PreviousOffset)->second;
+      bool SameAccessingFunctions =
+          PreviousGlobalPart.AccessingFunctions.size() ==
+              Part.AccessingFunctions.size() &&
+          all_of(PreviousGlobalPart.AccessingFunctions, [&](Function *F) {
+            return Part.AccessingFunctions.contains(F);
+          });
+      if (SameAccessingFunctions)
+        UnionGroups(Previous, I);
+      It->second = I;
+    }
+  }
+
+  SmallVector<SmallVector<unsigned, 4>, 16> Groups;
+  unsigned NoGroup = TypesVector.size();
+  SmallVector<unsigned, 16> GroupIndices(TypesVector.size(), NoGroup);
+  for (unsigned I = 0; I != TypesVector.size(); ++I) {
+    unsigned Root = FindGroup(I);
+    unsigned &GroupIndex = GroupIndices[Root];
+    if (GroupIndex == NoGroup) {
+      GroupIndex = Groups.size();
+      Groups.emplace_back();
+    }
+    Groups[GroupIndex].push_back(I);
+  }
+
+  SmallVector<uint64_t, 16> ReplacementOffsets(TypesVector.size());
+  SmallVector<uint64_t, 16> GroupSizes;
+  SmallVector<Align, 16> GroupAlignments;
+  for (const auto &Group : Groups) {
+    Align GroupAlignment(1);
+    uint64_t NextOffset = 0;
+    for (unsigned I : Group) {
+      auto &[OffsetForTy, Ty, _] = TypesVector[I];
+      Align PartAlignment = commonAlignment(StartAlignment, OffsetForTy);
+      GroupAlignment = std::max(GroupAlignment, PartAlignment);
+      ReplacementOffsets[I] = alignTo(NextOffset, PartAlignment);
+      NextOffset = ReplacementOffsets[I] + DL.getTypeAllocSize(Ty);
+    }
+    GroupSizes.push_back(NextOffset);
+    GroupAlignments.push_back(GroupAlignment);
+  }
+
+  // Grouping would recreate the original allocation, so keep it as-is. This
+  // also prevents grouped replacement globals from being repeatedly split.
+  bool SameLayout = Groups.size() == 1 &&
+                    std::get<0>(TypesVector.front()) == 0 &&
+                    GroupSizes.front() == GV->getGlobalSize(DL);
+  for (unsigned I = 0; SameLayout && I != TypesVector.size(); ++I)
+    SameLayout = ReplacementOffsets[I] == std::get<0>(TypesVector[I]);
+  if (TypesVector.size() > 1 && SameLayout) {
+    assert(all_of(Parts,
+                  [](const auto &Pair) {
+                    return Pair.second.IsLoaded && Pair.second.IsStored;
+                  }) &&
+           "One-sided SRA parts cannot preserve the original layout");
+    return nullptr;
+  }
+
+  LLVM_DEBUG(dbgs() << "PERFORMING GLOBAL SRA ON: " << *GV << "\n");
+
   uint64_t VarSize = DL.getTypeSizeInBits(GV->getValueType());
 
   // Create replacement globals.
-  DenseMap<uint64_t, GlobalVariable *> NewGlobals;
+  struct SRAReplacement {
+    GlobalVariable *GV;
+    uint64_t Offset;
+  };
+  DenseMap<uint64_t, SRAReplacement> Replacements;
+  GlobalVariable *FirstNewGlobal = nullptr;
   unsigned NameSuffix = 0;
-  for (auto &[OffsetForTy, Ty, Initializer] : TypesVector) {
+  for (unsigned GroupIndex = 0; GroupIndex != Groups.size(); ++GroupIndex) {
+    const auto &Group = Groups[GroupIndex];
+    Type *NewTy;
+    Constant *NewInitializer;
+    if (Group.size() == 1) {
+      NewTy = std::get<1>(TypesVector[Group.front()]);
+      NewInitializer = std::get<2>(TypesVector[Group.front()]);
+    } else {
+      SmallVector<Type *, 16> ElementTypes;
+      SmallVector<Constant *, 16> Initializers;
+      uint64_t NextOffset = 0;
+      for (unsigned I : Group) {
+        auto &[_, Ty, Initializer] = TypesVector[I];
+        uint64_t NewOffset = ReplacementOffsets[I];
+        if (NewOffset != NextOffset) {
+          auto *PaddingTy = ArrayType::get(Type::getInt8Ty(GV->getContext()),
+                                           NewOffset - NextOffset);
+          ElementTypes.push_back(PaddingTy);
+          Initializers.push_back(UndefValue::get(PaddingTy));
+        }
+        ElementTypes.push_back(Ty);
+        Initializers.push_back(Initializer);
+        NextOffset = NewOffset + DL.getTypeAllocSize(Ty);
+      }
+      auto *GroupTy =
+          StructType::get(GV->getContext(), ElementTypes, /*isPacked=*/true);
+      NewTy = GroupTy;
+      NewInitializer = ConstantStruct::get(GroupTy, Initializers);
+    }
+    assert(DL.getTypeAllocSize(NewTy).getFixedValue() ==
+               GroupSizes[GroupIndex] &&
+           "Grouped replacement has unexpected layout");
+
     GlobalVariable *NGV = new GlobalVariable(
-        *GV->getParent(), Ty, false, GlobalVariable::InternalLinkage,
-        Initializer, GV->getName() + "." + Twine(NameSuffix++), GV,
+        *GV->getParent(), NewTy, false, GlobalVariable::InternalLinkage,
+        NewInitializer, GV->getName() + "." + Twine(NameSuffix++), GV,
         GV->getThreadLocalMode(), GV->getAddressSpace());
+    if (!FirstNewGlobal)
+      FirstNewGlobal = NGV;
+
     // Start out by copying attributes from the original, including alignment.
     NGV->copyAttributesFrom(GV);
-    NewGlobals.insert({OffsetForTy, NGV});
+    for (unsigned I : Group) {
+      uint64_t OffsetForTy = std::get<0>(TypesVector[I]);
+      Replacements.insert(
+          {OffsetForTy, SRAReplacement{NGV, ReplacementOffsets[I]}});
+    }
 
     // Calculate the known alignment of the field.  If the original aggregate
     // had 256 byte alignment for example, then the element at a given offset
     // may also have a known alignment, and something might depend on that:
     // propagate info to each field.
-    Align NewAlign = commonAlignment(StartAlignment, OffsetForTy);
-    NGV->setAlignment(NewAlign);
+    NGV->setAlignment(GroupAlignments[GroupIndex]);
 
     // Copy over the debug info for the variable.
-    transferSRADebugInfo(GV, NGV, OffsetForTy * 8,
-                         DL.getTypeAllocSizeInBits(Ty), VarSize);
+    for (unsigned I : Group) {
+      auto &[OffsetForTy, Ty, _] = TypesVector[I];
+      transferSRADebugInfo(GV, NGV, OffsetForTy * 8,
+                           DL.getTypeAllocSizeInBits(Ty), ReplacementOffsets[I],
+                           VarSize);
+    }
   }
 
   // Replace uses of the original global with uses of the new global.
@@ -626,20 +797,30 @@ static GlobalVariable *SRAGlobal(GlobalVariable *GV, const DataLayout &DL) {
       Ptr = Ptr->stripAndAccumulateConstantOffsets(DL, Offset,
                                                    /* AllowNonInbounds */ true);
       assert(Ptr == GV && "Load/store must be from/to global");
-      GlobalVariable *NGV = NewGlobals[Offset.getZExtValue()];
-      assert(NGV && "Must have replacement global for this offset");
+      auto ReplacementIt = Replacements.find(Offset.getZExtValue());
+      assert(ReplacementIt != Replacements.end() &&
+             "Must have replacement global for this offset");
+      const SRAReplacement &Replacement = ReplacementIt->second;
+      Constant *NewPtr = Replacement.GV;
+      if (Replacement.Offset != 0) {
+        Constant *Index = ConstantInt::get(
+            DL.getIndexType(Replacement.GV->getType()), Replacement.Offset);
+        NewPtr =
+            ConstantExpr::getGetElementPtr(Type::getInt8Ty(GV->getContext()),
+                                           NewPtr, ArrayRef<Value *>{Index});
+      }
 
       // Update the pointer operand and recalculate alignment.
       Align PrefAlign = DL.getPrefTypeAlign(getLoadStoreType(V));
-      Align NewAlign =
-          getOrEnforceKnownAlignment(NGV, PrefAlign, DL, cast<Instruction>(V));
+      Align NewAlign = getOrEnforceKnownAlignment(NewPtr, PrefAlign, DL,
+                                                  cast<Instruction>(V));
 
       if (auto *LI = dyn_cast<LoadInst>(V)) {
-        LI->setOperand(0, NGV);
+        LI->setOperand(0, NewPtr);
         LI->setAlignment(NewAlign);
       } else {
         auto *SI = cast<StoreInst>(V);
-        SI->setOperand(1, NGV);
+        SI->setOperand(1, NewPtr);
         SI->setAlignment(NewAlign);
       }
       continue;
@@ -655,8 +836,8 @@ static GlobalVariable *SRAGlobal(GlobalVariable *GV, const DataLayout &DL) {
   GV->eraseFromParent();
   ++NumSRA;
 
-  assert(NewGlobals.size() > 0);
-  return NewGlobals.begin()->second;
+  assert(FirstNewGlobal);
+  return FirstNewGlobal;
 }
 
 /// Return true if all users of the specified value will trap if the value is
