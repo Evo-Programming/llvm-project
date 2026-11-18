@@ -164,6 +164,21 @@ def IsCPSRDefined : CheckFunctionPredicateWithTII<
 
 def IsCPSRDefinedPred : MCSchedPredicate<IsCPSRDefined>;
 
+let FunctionMapper = "ARM_AM::getSORegShOp" in {
+  class CheckSORegNoShift<int n> : CheckImmOperand_s<n, "ARM_AM::no_shift">;
+  class CheckSORegShiftLSL<int n> : CheckImmOperand_s<n, "ARM_AM::lsl">;
+}
+
+let FunctionMapper = "ARM_AM::getSORegOffset" in {
+  class CheckSORegOffset<int n, int of> : CheckImmOperand<n, of> {}
+}
+
+let FunctionMapper = "ARM_AM::getT2SOImmValRotateVal" in {
+  class CheckIsT2SOImmValRotate<int n> : CheckImmOperandGT<n, -1> {}
+}
+
+class IsT2SOImmValRotatePred<int n> : MCSchedPredicate<CheckIsT2SOImmValRotate<n>>;
+
 let FunctionMapper = "ARM_AM::getAM2ShiftOpc" in {
   class CheckAM2NoShift<int n> : CheckImmOperand_s<n, "ARM_AM::no_shift">;
   class CheckAM2ShiftLSL<int n> : CheckImmOperand_s<n, "ARM_AM::lsl">;

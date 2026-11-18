@@ -358,7 +358,7 @@ def : ProcNoItin<"cortex-m23",                          [ARMv8mBaseline,
                                                          FeatureNoMovt,
                                                          FeatureHasNoBranchPredictor]>;
 
-def : ProcessorModel<"cortex-m33", CortexM4Model,       [ARMv8mMainline,
+def : ProcessorModel<"cortex-m33", CortexM33Model,      [ARMv8mMainline,
                                                          FeatureDSP,
                                                          FeatureFPARMv8_D16_SP,
                                                          FeaturePreferBranchAlign32,

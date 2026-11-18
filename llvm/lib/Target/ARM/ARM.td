@@ -61,6 +61,7 @@ include "ARMScheduleM4.td"
 include "ARMScheduleM55.td"
 include "ARMScheduleM7.td"
 include "ARMScheduleM85.td"
+include "ARMScheduleM33.td"
 
 include "ARMProcessors.td"
 
